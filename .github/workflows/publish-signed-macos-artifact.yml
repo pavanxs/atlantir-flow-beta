@@ -1,0 +1,52 @@
+name: Publish signed macOS artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_url:
+        description: Temporary signed URL for the completed private build artifact
+        required: true
+      release_tag:
+        description: Public beta release tag
+        required: true
+        default: v0.0.1-beta.1
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download completed signed build artifact
+        env:
+          ARTIFACT_URL: ${{ inputs.artifact_url }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --silent --show-error \
+            "$ARTIFACT_URL" \
+            --output signed-macos-artifact.zip
+          unzip -q signed-macos-artifact.zip -d signed-macos-artifact
+          ls -lah signed-macos-artifact
+
+      - name: Prepare signed release asset
+        run: |
+          set -euo pipefail
+          dmg="$(find signed-macos-artifact -type f -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          cp "$dmg" Atlantir-Flow-macOS-Apple-Silicon-Beta-Signed.dmg
+          sha256sum Atlantir-Flow-macOS-Apple-Silicon-Beta-Signed.dmg > Atlantir-Flow-macOS-Apple-Silicon-Beta-Signed.dmg.sha256
+          ls -lh Atlantir-Flow-macOS-Apple-Silicon-Beta-Signed.dmg*
+
+      - name: Upload signed Mac beta release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            Atlantir-Flow-macOS-Apple-Silicon-Beta-Signed.dmg \
+            Atlantir-Flow-macOS-Apple-Silicon-Beta-Signed.dmg.sha256 \
+            --repo pavanxs/atlantir-flow-beta \
+            --clobber
