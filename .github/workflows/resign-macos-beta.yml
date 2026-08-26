@@ -34,7 +34,13 @@ jobs:
           echo "APP_PATH=$app" >> "$GITHUB_ENV"
 
       - name: Remove signing-hostile extended attributes
-        run: xattr -cr "$APP_PATH"
+        run: |
+          xattr -cr "$APP_PATH"
+          # Handy's `portable` file is a plain text mode marker, not code.
+          # The original unsigned DMG preserved it as executable, which makes
+          # codesign treat it as an unsigned nested code object.
+          chmod 0644 "$APP_PATH/Contents/Resources/resources/handy/portable"
+          ls -l "$APP_PATH/Contents/Resources/resources/handy/portable"
 
       - name: Inventory bundled executable code
         run: |
