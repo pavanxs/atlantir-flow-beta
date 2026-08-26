@@ -56,6 +56,15 @@ jobs:
           main_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
           main_exec="$APP_PATH/Contents/MacOS/$main_name"
 
+          # Strip any stale signatures carried by the original build before
+          # re-signing. The embedded Handy binary can otherwise retain a
+          # signature envelope from its original packaging context.
+          while IFS= read -r -d '' file_path; do
+            if file "$file_path" | grep -q 'Mach-O'; then
+              codesign --remove-signature "$file_path" 2>/dev/null || true
+            fi
+          done < <(find "$APP_PATH/Contents" -type f -print0)
+
           while IFS= read -r -d '' file_path; do
             if [ "$file_path" = "$main_exec" ]; then
               continue
@@ -76,7 +85,8 @@ jobs:
                 codesign --force --sign - --timestamp=none "$nested_bundle"
               done
 
-          codesign --force --sign - --timestamp=none "$APP_PATH"
+          codesign --force --sign - --timestamp=none "$main_exec"
+          codesign --force --deep --sign - --timestamp=none "$APP_PATH"
 
       - name: Verify app and every Mach-O signature
         run: |
