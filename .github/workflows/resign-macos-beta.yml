@@ -1,0 +1,116 @@
+name: Re-sign macOS beta binary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  resign-macos-dmg:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Download existing public DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/input build/work build/output
+          gh release download v0.0.1-beta.1 \
+            --repo pavanxs/atlantir-flow-beta \
+            --pattern 'Atlantir-Flow-macOS-Apple-Silicon-Beta.dmg' \
+            --dir build/input
+          echo 'd1233039046241bd2ab3ed20f0653386720c4de47de2e2cde13248487125491f  build/input/Atlantir-Flow-macOS-Apple-Silicon-Beta.dmg' | shasum -a 256 -c -
+
+      - name: Copy DMG contents to writable staging
+        run: |
+          mount_dir="$RUNNER_TEMP/atlantir-flow-beta-mount"
+          mkdir -p "$mount_dir" build/work/dmg-root
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" build/input/Atlantir-Flow-macOS-Apple-Silicon-Beta.dmg
+          ditto "$mount_dir/" build/work/dmg-root/
+          hdiutil detach "$mount_dir"
+          app="$(find build/work/dmg-root -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app"
+          echo "APP_PATH=$app" >> "$GITHUB_ENV"
+
+      - name: Remove signing-hostile extended attributes
+        run: xattr -cr "$APP_PATH"
+
+      - name: Inventory bundled executable code
+        run: |
+          echo 'Mach-O files in app bundle:'
+          while IFS= read -r -d '' file_path; do
+            if file "$file_path" | grep -q 'Mach-O'; then
+              file "$file_path"
+            fi
+          done < <(find "$APP_PATH" -type f -print0)
+
+      - name: Ad-hoc sign nested executable code
+        run: |
+          main_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
+          main_exec="$APP_PATH/Contents/MacOS/$main_name"
+
+          while IFS= read -r -d '' file_path; do
+            if [ "$file_path" = "$main_exec" ]; then
+              continue
+            fi
+            if file "$file_path" | grep -q 'Mach-O'; then
+              codesign --force --sign - --timestamp=none "$file_path"
+            fi
+          done < <(find "$APP_PATH/Contents" -type f -print0)
+
+          find "$APP_PATH/Contents" \
+            \( -name '*.framework' -o -name '*.xpc' -o -name '*.appex' -o -name '*.app' \) \
+            -type d -print \
+            | awk '{ print length($0), $0 }' \
+            | sort -rn \
+            | cut -d' ' -f2- \
+            | while IFS= read -r nested_bundle; do
+                [ -n "$nested_bundle" ] || continue
+                codesign --force --sign - --timestamp=none "$nested_bundle"
+              done
+
+          codesign --force --sign - --timestamp=none "$APP_PATH"
+
+      - name: Verify app and every Mach-O signature
+        run: |
+          while IFS= read -r -d '' file_path; do
+            if file "$file_path" | grep -q 'Mach-O'; then
+              codesign --verify --strict --verbose=2 "$file_path"
+            fi
+          done < <(find "$APP_PATH" -type f -print0)
+
+          codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+          codesign -dv --verbose=4 "$APP_PATH" 2>&1 | tee build/output/app-codesign.txt
+          grep -q 'Signature=adhoc' build/output/app-codesign.txt
+
+          # Ad-hoc signing is intentionally not Developer-ID notarization, so
+          # Gatekeeper may still require a user approval. Capture the assessment
+          # for diagnostics but do not treat that expected rejection as failure.
+          spctl --assess --type execute -vv "$APP_PATH" 2>&1 | tee build/output/gatekeeper-assessment.txt || true
+
+      - name: Rebuild ad-hoc signed DMG
+        run: |
+          output='build/output/Atlantir-Flow-macOS-Apple-Silicon-Beta-AdHoc.dmg'
+          hdiutil create \
+            -volname 'Atlantir Flow' \
+            -srcfolder build/work/dmg-root \
+            -ov \
+            -format UDZO \
+            "$output"
+          codesign --force --sign - --timestamp=none "$output"
+          codesign --verify --verbose=4 "$output"
+          shasum -a 256 "$output" > "$output.sha256"
+          ls -lh build/output
+
+      - name: Upload signed test DMG to beta release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload v0.0.1-beta.1 \
+            --repo pavanxs/atlantir-flow-beta \
+            build/output/Atlantir-Flow-macOS-Apple-Silicon-Beta-AdHoc.dmg \
+            build/output/Atlantir-Flow-macOS-Apple-Silicon-Beta-AdHoc.dmg.sha256 \
+            build/output/app-codesign.txt \
+            build/output/gatekeeper-assessment.txt \
+            --clobber
